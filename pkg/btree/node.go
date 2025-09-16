@@ -2,32 +2,43 @@ package btree
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 )
 
-// Node represents a node in the binary tree
+// Node represents a node in a tree structure
 type Node struct {
-	name     string
-	inbound  chan Message
-	leftOut  chan Message
-	rightOut chan Message
-	mu       sync.RWMutex
-	ctx      context.Context
-	cancel   context.CancelFunc
+	name        string
+	inbound     chan Message
+	childrenOut []chan Message
+	mu          sync.RWMutex
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
-// NewNode creates a new btree node
-func NewNode(name string) *Node {
+// NewNode creates a new tree node with the specified number of children
+func NewNode(name string, numChildren int) *Node {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Node{
-		name:     name,
-		inbound:  make(chan Message, 100),
-		leftOut:  make(chan Message, 100),
-		rightOut: make(chan Message, 100),
-		ctx:      ctx,
-		cancel:   cancel,
+
+	// Create channels for each child
+	childrenOut := make([]chan Message, numChildren)
+	for i := range childrenOut {
+		childrenOut[i] = make(chan Message, 100)
 	}
+
+	return &Node{
+		name:        name,
+		inbound:     make(chan Message, 100),
+		childrenOut: childrenOut,
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+}
+
+// NewBinaryNode creates a new binary tree node (convenience function)
+func NewBinaryNode(name string) *Node {
+	return NewNode(name, 2)
 }
 
 // Start begins message processing for this node
@@ -45,60 +56,89 @@ func (n *Node) GetInboundChannel() chan<- Message {
 	return n.inbound
 }
 
-// GetLeftChannel returns the channel for left child communication
+// GetChildChannel returns the channel for the specified child index
+func (n *Node) GetChildChannel(index int) (<-chan Message, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if index < 0 || index >= len(n.childrenOut) {
+		return nil, fmt.Errorf("child index %d out of range [0, %d)", index, len(n.childrenOut))
+	}
+
+	return n.childrenOut[index], nil
+}
+
+// GetLeftChannel returns the channel for left child (index 0) - convenience for binary trees
 func (n *Node) GetLeftChannel() <-chan Message {
-	return n.leftOut
+	if len(n.childrenOut) > 0 {
+		return n.childrenOut[0]
+	}
+	return nil
 }
 
-// GetRightChannel returns the channel for right child communication
+// GetRightChannel returns the channel for right child (index 1) - convenience for binary trees
 func (n *Node) GetRightChannel() <-chan Message {
-	return n.rightOut
+	if len(n.childrenOut) > 1 {
+		return n.childrenOut[1]
+	}
+	return nil
 }
 
-// HandleMessage processes an incoming message
+// GetNumChildren returns the number of children this node supports
+func (n *Node) GetNumChildren() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return len(n.childrenOut)
+}
+
+// HandleMessage processes an incoming message and forwards to all children
 func (n *Node) HandleMessage(ctx context.Context, msg Message) error {
 	log.Printf("[%s] Received message: %s", n.name, msg.Content)
 
-	// Send to both children (if channels are being listened to)
-	select {
-	case n.leftOut <- msg:
-		log.Printf("[%s] Forwarded to left child", n.name)
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		// Left channel is full or not being read, continue
-	}
+	// Send to all children
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 
-	select {
-	case n.rightOut <- msg:
-		log.Printf("[%s] Forwarded to right child", n.name)
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		// Right channel is full or not being read, continue
+	for i, childOut := range n.childrenOut {
+		select {
+		case childOut <- msg:
+			log.Printf("[%s] Forwarded to child %d", n.name, i)
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Child channel is full or not being read, continue
+			log.Printf("[%s] Child %d channel full, skipping", n.name, i)
+		}
 	}
 
 	return nil
 }
 
-// SendToLeft sends a message to the left child
-func (n *Node) SendToLeft(ctx context.Context, msg Message) error {
+// SendToChild sends a message to the specified child index
+func (n *Node) SendToChild(ctx context.Context, index int, msg Message) error {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if index < 0 || index >= len(n.childrenOut) {
+		return fmt.Errorf("child index %d out of range [0, %d)", index, len(n.childrenOut))
+	}
+
 	select {
-	case n.leftOut <- msg:
+	case n.childrenOut[index] <- msg:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// SendToRight sends a message to the right child
+// SendToLeft sends a message to the left child (index 0) - convenience for binary trees
+func (n *Node) SendToLeft(ctx context.Context, msg Message) error {
+	return n.SendToChild(ctx, 0, msg)
+}
+
+// SendToRight sends a message to the right child (index 1) - convenience for binary trees
 func (n *Node) SendToRight(ctx context.Context, msg Message) error {
-	select {
-	case n.rightOut <- msg:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return n.SendToChild(ctx, 1, msg)
 }
 
 // Receive returns the channel to receive messages

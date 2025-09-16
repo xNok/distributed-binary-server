@@ -11,21 +11,13 @@ import (
 	"github.com/xnok/btree-server-msg/pkg/transport/tcp"
 )
 
-// NodeConfig holds the configuration for a btree node
-type NodeConfig struct {
-	Port      string
-	LeftPort  *string
-	RightPort *string
-}
-
 // BTreeNode represents a complete btree node with transport and wiring
 type BTreeNode struct {
-	Node        *btree.Node
-	Server      *transport.Server
-	LeftClient  *transport.Client
-	RightClient *transport.Client
-	ctx         context.Context
-	cancel      context.CancelFunc
+	Node            *btree.Node
+	Server          *transport.Server
+	ChildrenClients []*transport.Client
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 // TransportFactory defines a function that creates transport instances
@@ -35,30 +27,28 @@ type TransportFactory func() transport.Transport
 func NewBTreeNode(config NodeConfig, transportFactory TransportFactory) (*BTreeNode, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create the btree node
+	// Create the btree node with the number of children specified in config
 	nodeName := fmt.Sprintf("node-%s", config.Port)
-	node := btree.NewNode(nodeName)
+	node := btree.NewNode(nodeName, config.GetNumChildren())
 
 	// Create and configure the server with the specified transport
 	serverTransport := transportFactory()
 	server := transport.NewServer(serverTransport, config.Port)
 
 	btreeNode := &BTreeNode{
-		Node:   node,
-		Server: server,
-		ctx:    ctx,
-		cancel: cancel,
+		Node:            node,
+		Server:          server,
+		ChildrenClients: make([]*transport.Client, config.GetNumChildren()),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 
-	// Create child clients if configured
-	if config.LeftPort != nil {
-		leftTransport := transportFactory()
-		btreeNode.LeftClient = transport.NewClient(leftTransport, *config.LeftPort)
-	}
-
-	if config.RightPort != nil {
-		rightTransport := transportFactory()
-		btreeNode.RightClient = transport.NewClient(rightTransport, *config.RightPort)
+	// Create child clients for each configured child port
+	for i, childPort := range config.ChildrenPorts {
+		if childPort != "" {
+			childTransport := transportFactory()
+			btreeNode.ChildrenClients[i] = transport.NewClient(childTransport, childPort)
+		}
 	}
 
 	return btreeNode, nil
@@ -87,14 +77,11 @@ func (bn *BTreeNode) Start() error {
 	go bn.wireInbound()
 
 	// Connect to children and wire outbound messages
-	if bn.LeftClient != nil {
-		go bn.connectToChild(bn.LeftClient, "left")
-		go bn.wireLeftOutbound()
-	}
-
-	if bn.RightClient != nil {
-		go bn.connectToChild(bn.RightClient, "right")
-		go bn.wireRightOutbound()
+	for i, client := range bn.ChildrenClients {
+		if client != nil {
+			go bn.connectToChild(client, fmt.Sprintf("child-%d", i))
+			go bn.wireChildOutbound(i)
+		}
 	}
 
 	return nil
@@ -110,12 +97,11 @@ func (bn *BTreeNode) Stop() error {
 	// Stop node
 	bn.Node.Stop()
 
-	// Close clients
-	if bn.LeftClient != nil {
-		bn.LeftClient.Close()
-	}
-	if bn.RightClient != nil {
-		bn.RightClient.Close()
+	// Close all child clients
+	for _, client := range bn.ChildrenClients {
+		if client != nil {
+			client.Close()
+		}
 	}
 
 	// Close server
@@ -140,35 +126,26 @@ func (bn *BTreeNode) wireInbound() {
 	}
 }
 
-// wireLeftOutbound connects node left channel to left client
-func (bn *BTreeNode) wireLeftOutbound() {
-	for {
-		select {
-		case msg := <-bn.Node.GetLeftChannel():
-			if bn.LeftClient != nil {
-				select {
-				case bn.LeftClient.GetOutboundChannel() <- msg:
-				case <-bn.ctx.Done():
-					return
-				}
-			}
-		case <-bn.ctx.Done():
-			return
-		}
+// wireChildOutbound connects node child channel to corresponding client
+func (bn *BTreeNode) wireChildOutbound(childIndex int) {
+	childChannel, err := bn.Node.GetChildChannel(childIndex)
+	if err != nil {
+		log.Printf("Error getting child channel %d: %v", childIndex, err)
+		return
 	}
-}
 
-// wireRightOutbound connects node right channel to right client
-func (bn *BTreeNode) wireRightOutbound() {
+	client := bn.ChildrenClients[childIndex]
+	if client == nil {
+		return
+	}
+
 	for {
 		select {
-		case msg := <-bn.Node.GetRightChannel():
-			if bn.RightClient != nil {
-				select {
-				case bn.RightClient.GetOutboundChannel() <- msg:
-				case <-bn.ctx.Done():
-					return
-				}
+		case msg := <-childChannel:
+			select {
+			case client.GetOutboundChannel() <- msg:
+			case <-bn.ctx.Done():
+				return
 			}
 		case <-bn.ctx.Done():
 			return
@@ -186,7 +163,7 @@ func (bn *BTreeNode) connectToChild(client *transport.Client, childName string) 
 		}
 
 		if err := client.Connect(bn.ctx); err != nil {
-			log.Printf("Failed to connect to %s child (attempt %d): %v", childName, i+1, err)
+			log.Printf("Failed to connect to %s (attempt %d): %v", childName, i+1, err)
 			select {
 			case <-time.After(time.Second):
 			case <-bn.ctx.Done():
@@ -195,9 +172,33 @@ func (bn *BTreeNode) connectToChild(client *transport.Client, childName string) 
 			continue
 		}
 
-		log.Printf("Connected to %s child", childName)
+		log.Printf("Connected to %s", childName)
 		return
 	}
 
-	log.Printf("Failed to connect to %s child after 10 attempts", childName)
+	log.Printf("Failed to connect to %s after 10 attempts", childName)
+}
+
+// GetLeftClient returns the left child client (index 0) - convenience for binary trees
+func (bn *BTreeNode) GetLeftClient() *transport.Client {
+	if len(bn.ChildrenClients) > 0 {
+		return bn.ChildrenClients[0]
+	}
+	return nil
+}
+
+// GetRightClient returns the right child client (index 1) - convenience for binary trees
+func (bn *BTreeNode) GetRightClient() *transport.Client {
+	if len(bn.ChildrenClients) > 1 {
+		return bn.ChildrenClients[1]
+	}
+	return nil
+}
+
+// GetChildClient returns the client for the specified child index
+func (bn *BTreeNode) GetChildClient(index int) *transport.Client {
+	if index >= 0 && index < len(bn.ChildrenClients) {
+		return bn.ChildrenClients[index]
+	}
+	return nil
 }

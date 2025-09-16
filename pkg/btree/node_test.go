@@ -8,8 +8,8 @@ import (
 )
 
 func TestNodeMessagePropagation(t *testing.T) {
-	// Create a parent node
-	parent := NewNode("parent")
+	// Create a parent node with 2 children (binary tree)
+	parent := NewBinaryNode("parent")
 	parent.Start()
 	defer parent.Stop()
 
@@ -90,7 +90,7 @@ func TestNodeMessagePropagation(t *testing.T) {
 
 func TestNodeWithoutChildren(t *testing.T) {
 	// Create a node without children
-	node := NewNode("standalone")
+	node := NewNode("standalone", 0)
 	node.Start()
 	defer node.Stop()
 
@@ -107,13 +107,13 @@ func TestNodeWithoutChildren(t *testing.T) {
 		t.Fatalf("Failed to handle message: %v", err)
 	}
 
-	// Node should not block even without children listening to its output channels
+	// Node should not block even without children
 	// This test ensures the node handles the case gracefully
 }
 
 func TestMultipleMessages(t *testing.T) {
-	// Create a parent node
-	parent := NewNode("parent")
+	// Create a parent node with 1 child
+	parent := NewNode("parent", 1)
 	parent.Start()
 	defer parent.Stop()
 
@@ -124,9 +124,14 @@ func TestMultipleMessages(t *testing.T) {
 	// Create mock child receiver
 	receiver := make(chan Message, 10)
 
-	// Wire up left channel only
+	// Wire up child channel
+	childChannel, err := parent.GetChildChannel(0)
+	if err != nil {
+		t.Fatalf("Failed to get child channel: %v", err)
+	}
+
 	go func() {
-		for msg := range parent.GetLeftChannel() {
+		for msg := range childChannel {
 			receiver <- msg
 		}
 	}()
@@ -177,9 +182,9 @@ func TestMultipleMessages(t *testing.T) {
 
 func TestChannelBasedNodeIntegration(t *testing.T) {
 	// Create nodes for a simple tree: parent -> left, right
-	parent := NewNode("parent")
-	left := NewNode("left")
-	right := NewNode("right")
+	parent := NewBinaryNode("parent")
+	left := NewNode("left", 0)
+	right := NewNode("right", 0)
 
 	parent.Start()
 	left.Start()
@@ -224,4 +229,43 @@ func TestChannelBasedNodeIntegration(t *testing.T) {
 
 	// This test demonstrates that we can wire up nodes using only channels
 	// without any TCP connections, making testing much easier
+}
+
+func TestFlexibleChildren(t *testing.T) {
+	// Test a node with 3 children (ternary tree)
+	parent := NewNode("parent", 3)
+	parent.Start()
+	defer parent.Stop()
+
+	// Verify we can get all child channels
+	for i := 0; i < 3; i++ {
+		channel, err := parent.GetChildChannel(i)
+		if err != nil {
+			t.Errorf("Failed to get child channel %d: %v", i, err)
+		}
+		if channel == nil {
+			t.Errorf("Child channel %d should not be nil", i)
+		}
+	}
+
+	// Verify out of bounds returns error
+	_, err := parent.GetChildChannel(3)
+	if err == nil {
+		t.Error("Expected error for out of bounds child index")
+	}
+
+	// Test sending to specific child
+	testMsg := Message{Content: "Test message", ID: "test"}
+	ctx := context.Background()
+
+	err = parent.SendToChild(ctx, 1, testMsg)
+	if err != nil {
+		t.Errorf("Failed to send to child 1: %v", err)
+	}
+
+	// Test out of bounds send
+	err = parent.SendToChild(ctx, 5, testMsg)
+	if err == nil {
+		t.Error("Expected error for out of bounds child send")
+	}
 }
