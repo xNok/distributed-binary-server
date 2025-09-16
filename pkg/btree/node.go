@@ -91,26 +91,42 @@ func (n *Node) GetNumChildren() int {
 	return len(n.childrenOut)
 }
 
-// HandleMessage processes an incoming message and forwards to all children
+// HandleMessage processes an incoming message and broadcasts to all children
 func (n *Node) HandleMessage(ctx context.Context, msg Message) error {
-	log.Printf("[%s] Received message: %s", n.name, msg.Content)
+	log.Printf("[%s] Received message: %s (ID: %s)", n.name, msg.Content, msg.ID)
 
-	// Send to all children
+	// Update message source for tracking
+	msg.Source = n.name
+
+	// Broadcast to all children
+	return n.BroadcastToChildren(ctx, msg)
+}
+
+// BroadcastToChildren sends a message to all children
+func (n *Node) BroadcastToChildren(ctx context.Context, msg Message) error {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
+	if len(n.childrenOut) == 0 {
+		log.Printf("[%s] No children to broadcast to (leaf node)", n.name)
+		return nil
+	}
+
+	successCount := 0
 	for i, childOut := range n.childrenOut {
 		select {
 		case childOut <- msg:
-			log.Printf("[%s] Forwarded to child %d", n.name, i)
+			log.Printf("[%s] Broadcast to child %d successful", n.name, i)
+			successCount++
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 			// Child channel is full or not being read, continue
-			log.Printf("[%s] Child %d channel full, skipping", n.name, i)
+			log.Printf("[%s] Child %d channel full, skipping broadcast", n.name, i)
 		}
 	}
 
+	log.Printf("[%s] Broadcast complete: %d/%d children reached", n.name, successCount, len(n.childrenOut))
 	return nil
 }
 
