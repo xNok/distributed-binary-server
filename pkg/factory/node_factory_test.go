@@ -11,7 +11,7 @@ import (
 func TestNewBTreeNode(t *testing.T) {
 	// Test creating a node without children
 	config := NewNodeConfigFromPorts("8080", nil, nil)
-	
+
 	// Use TCP transport factory
 	node, err := NewBTreeNodeWithTCP(config)
 	if err != nil {
@@ -44,7 +44,7 @@ func TestNewBTreeNodeWithChildren(t *testing.T) {
 	leftPort := "8081"
 	rightPort := "8082"
 	config := NewNodeConfigFromPorts("8080", &leftPort, &rightPort)
-	
+
 	node, err := NewBTreeNodeWithTCP(config)
 	if err != nil {
 		t.Fatalf("Failed to create node: %v", err)
@@ -62,7 +62,7 @@ func TestNewBTreeNodeWithChildren(t *testing.T) {
 func TestBTreeNodeLifecycle(t *testing.T) {
 	// Test full lifecycle without actual network connections
 	config := NewNodeConfigFromPorts("8080", nil, nil)
-	
+
 	node, err := NewBTreeNodeWithTCP(config)
 	if err != nil {
 		t.Fatalf("Failed to create node: %v", err)
@@ -144,29 +144,29 @@ func stringPtr(s string) *string {
 // TestNewBTreeNodeWithCustomTransport tests using a custom transport factory
 func TestNewBTreeNodeWithCustomTransport(t *testing.T) {
 	config := NewNodeConfigFromPorts("8080", nil, nil)
-	
+
 	// Use custom transport factory
 	customTransportFactory := func() transport.Transport {
 		return tcp.NewTCPTransport() // In real scenario, this could be WebSocket, gRPC, etc.
 	}
-	
+
 	node, err := NewBTreeNode(config, customTransportFactory)
 	if err != nil {
 		t.Fatalf("Failed to create node with custom transport: %v", err)
 	}
-	
+
 	if node == nil {
 		t.Fatal("Node should not be nil")
 	}
-	
+
 	// Test that we can start and stop it
 	err = node.Start()
 	if err != nil {
 		t.Fatalf("Failed to start node: %v", err)
 	}
-	
+
 	time.Sleep(50 * time.Millisecond)
-	
+
 	err = node.Stop()
 	if err != nil {
 		t.Fatalf("Failed to stop node: %v", err)
